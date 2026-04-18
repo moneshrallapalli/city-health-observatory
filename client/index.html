@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>City Health Observatory</title>
+<meta name="theme-color" content="#f1ede4" id="meta-theme-color">
+<script>
+  // Apply saved/system theme BEFORE stylesheet paints — prevents a flash of
+  // the wrong edition on first paint. JS runs sync in <head> on purpose.
+  (function () {
+    try {
+      var saved = localStorage.getItem("cho-theme");
+      var prefersDark = window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var theme = saved || (prefersDark ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+      var meta = document.getElementById("meta-theme-color");
+      if (meta) meta.content = theme === "dark" ? "#14130f" : "#f1ede4";
+    } catch (e) { /* no-op */ }
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=JetBrains+Mono:wght@300;400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/ui/styles.css?v=14">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="mark"></span>
+    <span class="title">City Health Observatory</span>
+  </div>
+  <nav class="nav">
+    <a href="#submit">Interact</a>
+    <a href="#leaderboard">Leaderboard</a>
+    <a href="#analytics">Analytics</a>
+    <a href="#feed">Feed</a>
+    <a href="/openapi.yaml" target="_blank">API</a>
+  </nav>
+  <div class="meta">
+    <span class="live" id="live-pill"><span class="live-dot"></span>LIVE</span>
+    <span class="sep">·</span>
+    <span id="district-count">— entries</span>
+    <span class="sep">·</span>
+    <span id="clock">--:--:--</span>
+    <span class="sep">·</span>
+    <button class="theme-toggle" id="theme-toggle" type="button"
+            role="switch" aria-checked="false"
+            aria-label="Toggle light or dark edition">
+      <span class="tt-opt" data-mode="light">Light</span>
+      <span class="tt-opt" data-mode="dark">Dark</span>
+      <span class="tt-rail" aria-hidden="true"></span>
+    </button>
+  </div>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="hero-grid">
+      <div class="hero-left">
+        <div class="hero-label">URBAN HEALTH INDEX</div>
+        <div class="hero-score-row">
+          <div class="hero-score" id="hero-score" aria-live="polite">--</div>
+          <div class="hero-scale">
+            <div class="hero-scale-label">/ 100</div>
+            <div class="hero-scale-mark">healthy threshold · 80</div>
+          </div>
+        </div>
+        <div class="hero-status" aria-live="polite">
+          <span id="hero-status-text" class="status-pill">initializing</span>
+          <span id="hero-delta">Δ —</span>
+          <span class="sep">·</span>
+          <span id="hero-override">no override active</span>
+        </div>
+      </div>
+      <div class="hero-right">
+        <div class="hero-spark-label">last 36 windows</div>
+        <svg class="hero-sparkline" id="hero-sparkline" viewBox="0 0 600 100" preserveAspectRatio="none">
+          <line class="ref" x1="0" x2="600" y1="20" y2="20"/>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <section id="submit" class="actions">
+    <div class="section-head inline">
+      <div>
+        <h2>Interact</h2>
+        <div class="section-sub">override a district · remove from the board</div>
+      </div>
+    </div>
+
+    <div class="action-grid">
+
+      <form id="submit-form" class="action-card" autocomplete="off">
+        <div class="action-head">
+          <h3>Submit Readings <span class="primary-tag">POST /sensor · /add</span></h3>
+          <span class="card-sub">publish any subset of sensors · blank fields are skipped</span>
+        </div>
+        <p class="action-desc">
+          Fill any subset of sensors for a district — each goes to Kafka and blends into the next
+          5-second window. Optionally <b>pin the overall score</b> at the bottom to override the
+          pipeline on the leaderboard for ~30 seconds. Typing a place that isn't on the board
+          is fine — it'll appear as a <b>30-second spotlight</b> and then roll off automatically.
+        </p>
+
+        <label class="field">
+          <span>District <span class="district-hint" id="submit-district-hint" aria-live="polite"></span></span>
+          <input name="district" type="text" required maxlength="128"
+                 placeholder="e.g. Downtown · or any new place" list="districts-dl" />
+        </label>
+
+        <div class="sensors-head">
+          <span>Sensor readings</span>
+          <span class="sensors-hint">0–100 · blank = skip</span>
+        </div>
+        <div class="sensor-grid">
+          <label class="sensor"><span>Traffic</span>
+            <input name="traffic" type="number" step="0.1" min="0" max="100" placeholder="—" /></label>
+          <label class="sensor"><span>AQI</span>
+            <input name="aqi" type="number" step="0.1" min="0" max="100" placeholder="—" /></label>
+          <label class="sensor"><span>Power</span>
+            <input name="power" type="number" step="0.1" min="0" max="100" placeholder="—" /></label>
+          <label class="sensor"><span>Water</span>
+            <input name="water" type="number" step="0.1" min="0" max="100" placeholder="—" /></label>
+          <label class="sensor"><span>Noise</span>
+            <input name="noise" type="number" step="0.1" min="0" max="100" placeholder="—" /></label>
+        </div>
+
+        <details class="override-details">
+          <summary>Override overall UHS (optional)</summary>
+          <div class="override-body">
+            <label class="field narrow">
+              <span>Score (0–100)</span>
+              <input name="score" type="number" step="0.01" min="0" max="100" placeholder="—" />
+            </label>
+            <label class="catastrophic-toggle">
+              <input type="checkbox" name="catastrophic" id="submit-catastrophic" />
+              <span class="box" aria-hidden="true"></span>
+              <span class="catastrophic-text">
+                <b>catastrophic</b> · caps score at 25, fires cascade
+              </span>
+            </label>
+          </div>
+        </details>
+
+        <div class="preset-row">
+          <span class="preset-label">Quick push:</span>
+          <button type="button" class="chip" data-preset="broad-ripple-healthy">Broad Ripple · 88</button>
+          <button type="button" class="chip" data-preset="fountain-square-watch">Fountain Square · 66</button>
+          <button type="button" class="chip" data-preset="haughville-warn">Haughville · 42</button>
+          <button type="button" class="chip" data-preset="downtown-crit">Downtown · 18 cat</button>
+        </div>
+        <div class="action-foot">
+          <button type="submit" class="btn primary">Publish</button>
+          <span class="form-hint" id="submit-hint"></span>
+        </div>
+      </form>
+
+      <form id="remove-form" class="action-card" autocomplete="off">
+        <div class="action-head">
+          <h3>Remove District</h3>
+          <span class="card-sub">POST /remove</span>
+        </div>
+        <p class="action-desc">
+          Drops the district from the Redis sorted set and suppresses future pipeline updates.
+          Use this to clear a manual override or take a district off the board.
+        </p>
+        <div class="field-grid two">
+          <label class="field">
+            <span>Target district</span>
+            <input name="district" type="text" required list="districts-dl"
+                   placeholder="district id" id="remove-district-input" />
+          </label>
+        </div>
+        <div class="action-foot">
+          <button type="submit" class="btn">Remove from board</button>
+          <span class="form-hint" id="remove-hint"></span>
+        </div>
+      </form>
+
+    </div>
+  </section>
+
+  <section id="leaderboard" class="districts">
+    <div class="section-head">
+      <div>
+        <h2>Leaderboard</h2>
+        <div class="section-sub">ranked by Urban Health Score · /state polled every 5s</div>
+      </div>
+      <div class="legend">
+        <a class="html-preview-link" href="/leaderboard" target="_blank" title="Server-rendered HTML table (case requirement)">HTML view →</a>
+        <span class="legend-swatch" style="background:#a83626"></span><span>0–40</span>
+        <span class="legend-swatch" style="background:#c9a14a"></span><span>40–70</span>
+        <span class="legend-swatch" style="background:#5b7a4a"></span><span>70–100</span>
+      </div>
+    </div>
+    <div id="district-list" class="district-list" role="list"></div>
+    <div class="lb-pagination hidden" id="lb-pagination" role="navigation" aria-label="Leaderboard pages">
+      <button type="button" class="lb-nav" id="lb-prev" aria-label="Previous page">◀ Prev</button>
+      <span class="lb-page" id="lb-page">Page 1 of 1</span>
+      <button type="button" class="lb-nav" id="lb-next" aria-label="Next page">Next ▶</button>
+      <span class="lb-range" id="lb-range" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section id="analytics" class="analytics">
+    <div class="grid-3">
+
+      <div class="card dist-card">
+        <div class="card-head">
+          <h3>Distribution</h3>
+          <span class="card-sub">GET /info</span>
+        </div>
+
+        <div class="dist-headline" id="dist-headline"></div>
+
+        <div class="dist-chart-wrap">
+          <div class="dist-chart-labels">
+            <span class="dist-y-label" id="dist-y-max">—</span>
+            <span class="dist-y-axis">count</span>
+          </div>
+          <svg id="histogram" viewBox="0 0 320 160" preserveAspectRatio="none"></svg>
+          <div class="dist-x-axis" id="dist-x-axis">
+            <span>0</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span>
+          </div>
+        </div>
+
+        <div class="dist-kpis" id="dist-kpis"></div>
+
+        <div class="dist-section">
+          <div class="dist-section-title">Spread · min → max</div>
+          <svg id="boxplot" viewBox="0 0 320 54" preserveAspectRatio="none"></svg>
+          <div class="dist-box-legend" id="boxplot-legend"></div>
+        </div>
+
+        <div class="dist-section">
+          <div class="dist-section-title">Health bands · from live scores</div>
+          <div class="dist-bands" id="dist-bands"></div>
+        </div>
+
+        <div class="dist-interp" id="dist-interp"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Endpoint Latency</h3>
+          <span class="card-sub">GET /performance · ms</span>
+        </div>
+        <table class="perf-table" id="perf-table">
+          <thead><tr><th>route</th><th>avg ms</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="perf-foot" id="perf-foot"></div>
+        <div class="pipe-controls">
+          <button type="button" class="btn" id="pipe-toggle" aria-pressed="true">Pause processing</button>
+          <button type="button" class="btn" id="pipe-reset">Reset counters</button>
+          <span class="pipe-state" id="pipe-state"></span>
+        </div>
+        <div class="pipe-stats" id="pipe-stats"></div>
+      </div>
+
+      <div class="card" id="feed">
+        <div class="card-head">
+          <h3>Event Feed</h3>
+          <span class="card-sub" id="feed-card-sub">GET /history</span>
+        </div>
+
+        <div class="feed-controls">
+          <div class="feed-search">
+            <input type="search" id="feed-search" placeholder="search districts…" autocomplete="off" />
+            <button type="button" class="feed-search-clear" id="feed-search-clear" aria-label="Clear search" hidden>×</button>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-filter="all" role="tab">All</button>
+            <button class="tab" data-filter="manual" role="tab">Manual</button>
+            <button class="tab" data-filter="pipeline" role="tab">Pipeline</button>
+            <button class="tab" data-filter="catastrophic" role="tab">Catastrophic</button>
+          </div>
+          <select id="feed-window" title="time window">
+            <option value="600">last 10m</option>
+            <option value="3600" selected>last 1h</option>
+            <option value="21600">last 6h</option>
+            <option value="86400">last 24h</option>
+            <option value="0">all</option>
+            <option value="custom">custom…</option>
+          </select>
+          <button type="button" class="feed-more" id="feed-more-toggle"
+                  aria-expanded="false" aria-controls="feed-advanced">
+            <span>Filters</span><span class="chev" aria-hidden="true">▾</span>
+          </button>
+        </div>
+
+        <div class="feed-advanced" id="feed-advanced" hidden>
+          <div class="adv-row">
+            <label class="adv-label">Districts</label>
+            <div class="adv-body">
+              <div class="adv-chips" id="feed-district-chips"></div>
+              <input type="text" id="feed-district-add" list="districts-dl"
+                     placeholder="add district · Enter to confirm" autocomplete="off" />
+            </div>
+          </div>
+          <div class="adv-row">
+            <label class="adv-label">Score</label>
+            <div class="adv-body range-body">
+              <input type="number" id="feed-score-min" min="0" max="100" step="1" placeholder="min" />
+              <span class="range-sep">→</span>
+              <input type="number" id="feed-score-max" min="0" max="100" step="1" placeholder="max" />
+            </div>
+          </div>
+          <div class="adv-row" id="feed-custom-time" hidden>
+            <label class="adv-label">Time range</label>
+            <div class="adv-body range-body">
+              <input type="datetime-local" id="feed-from" />
+              <span class="range-sep">→</span>
+              <input type="datetime-local" id="feed-to" />
+            </div>
+          </div>
+          <div class="adv-row">
+            <label class="adv-label">Sort</label>
+            <div class="adv-body">
+              <select id="feed-sort">
+                <option value="newest" selected>newest first</option>
+                <option value="oldest">oldest first</option>
+                <option value="highest">score · high → low</option>
+                <option value="lowest">score · low → high</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-summary" id="feed-summary" hidden>
+          <span class="feed-count" id="feed-count"></span>
+          <div class="feed-active" id="feed-active"></div>
+          <button type="button" class="feed-reset" id="feed-reset">reset all</button>
+        </div>
+
+        <ol class="feed" id="feed-list"></ol>
+      </div>
+
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>Smart City Leaderboard · FastAPI + Kafka + Flink + Redis + Postgres</span>
+    <span class="sep">·</span>
+    <a href="/leaderboard" target="_blank">html view</a>
+    <span class="sep">·</span>
+    <a href="/openapi.yaml" target="_blank">openapi</a>
+    <span class="sep">·</span>
+    <a href="/docs" target="_blank">swagger</a>
+    <span class="sep">·</span>
+    <span id="mode-label">mode: —</span>
+  </footer>
+
+</main>
+
+<datalist id="districts-dl"></datalist>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="/ui/app.js?v=14"></script>
+</body>
+</html>

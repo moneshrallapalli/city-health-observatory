@@ -1,0 +1,133 @@
+openapi: 3.0.3
+info:
+  title: Smart City Infrastructure Health Leaderboard API
+  version: "1.0.0"
+  description: |
+    REST surface for the hackathon case. In Docker (`docker compose up`), scores are driven by
+    Kafka (Redpanda) sensor events, processed by Apache Flink (5-second tumbling windows,
+    weighted UHS aggregation, cascading-failure detection) into Redis sorted-sets, with
+    PostgreSQL history. Local `sqlite` mode keeps the same routes for offline demos.
+servers:
+  - url: http://localhost:8000
+paths:
+  /add:
+    post:
+      summary: Add or override a district score on the live leaderboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddBody"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddResponse"
+  /remove:
+    post:
+      summary: Remove a district from the live leaderboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveBody"
+      responses:
+        "200":
+          description: Removed
+        "404":
+          description: Not found
+  /leaderboard:
+    get:
+      summary: Top N leaderboard as HTML table
+      responses:
+        "200":
+          description: HTML document
+          content:
+            text/html:
+              schema:
+                type: string
+  /info:
+    get:
+      summary: Distribution & robust statistics across current live scores
+      responses:
+        "200":
+          description: Metrics JSON
+  /performance:
+    get:
+      summary: Rolling average API latency; includes pipeline stats when Redis worker is active
+      responses:
+        "200":
+          description: Timing JSON
+  /history:
+    get:
+      summary: Query score history (Postgres in full stack; sqlite in local mode)
+      parameters:
+        - in: query
+          name: user
+          schema:
+            type: string
+          description: Filter by district id (alias `district` supported in implementation)
+        - in: query
+          name: district
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+        - in: query
+          name: to
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: History page
+  /state:
+    get:
+      summary: JSON snapshot of all districts for the live dashboard (Redis pipeline mode)
+      responses:
+        "200":
+          description: District scores + components
+components:
+  schemas:
+    AddBody:
+      type: object
+      required: [score]
+      properties:
+        district:
+          type: string
+          description: City district id (preferred)
+        user:
+          type: string
+          description: Rubric-compatible alias for district
+        score:
+          type: number
+          description: Urban Health Score 0-100 (manual override)
+        catastrophic:
+          type: boolean
+          description: If true, worker may emit cascade alerts on large drops vs previous score
+    AddResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        district: { type: string }
+        score: { type: number }
+        created_at: { type: string, format: date-time }
+    RemoveBody:
+      type: object
+      required: [district]
+      properties:
+        district:
+          type: string
+        id:
+          type: string
+          description: Legacy alias; treated as district id when district omitted

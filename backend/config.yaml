@@ -1,0 +1,195 @@
+# Smart City Infrastructure Health Leaderboard — architecture config
+# See Brainstrom ideas.docx: Kafka bus → stream worker → Redis (live) + Postgres (history)
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+database:
+  # Local hack: sqlite. Full stack (Docker): postgresql://app:app@postgres:5432/citylb
+  url: "sqlite:///./data/leaderboard.db"
+
+redis:
+  url: "" # set REDIS_URL env in Docker, e.g. redis://redis:6379/0
+
+kafka:
+  bootstrap_servers: "localhost:19092"
+  consumer_group: "uhs-stream-worker"
+  # One topic per sensor family (matches brainstorm doc)
+  topics:
+    traffic: "sensor.traffic"
+    aqi: "sensor.aqi"
+    power: "sensor.power"
+    water: "sensor.water"
+    noise: "sensor.noise"
+  cascade_topic: "city.cascade"
+
+urban_health:
+  # UHS weights (sum should be 1.0) — doc: traffic/air/power/water/noise
+  weights:
+    traffic: 0.25
+    aqi: 0.30
+    power: 0.20
+    water: 0.10
+    noise: 0.15
+  aggregation_window_seconds: 5
+  decay:
+    # Blend new window score with previous published score (stability / pseudo time-decay)
+    previous_blend: 0.15
+  cascade:
+    drop_threshold: 20.0
+    neighbor_penalty: 12.0
+    penalty_windows: 2
+
+districts:
+  # Indianapolis metro — inner neighborhoods, near-ring historic districts, the
+  # outer townships, and the surrounding cities/towns.  The /add endpoint still
+  # accepts arbitrary ids; these are the seed list the simulator feeds and the
+  # UI/datalist surfaces.
+  ids:
+    # Downtown + historic near-core
+    - Downtown
+    - Mass Ave
+    - Fountain Square
+    - Fletcher Place
+    - Bates-Hendricks
+    - Old Northside
+    - Herron-Morton
+    - Chatham-Arch
+    - Lockerbie Square
+    - Cottage Home
+    - Woodruff Place
+    # Inner ring
+    - Near Eastside
+    - Near Southside
+    - Near Westside
+    - Haughville
+    - Riverside
+    - Crown Hill
+    - Mapleton-Fall Creek
+    - Fall Creek Place
+    - Martindale-Brightwood
+    # Mid-north / Midtown
+    - Butler-Tarkington
+    - Meridian-Kessler
+    - SoBro
+    - Broad Ripple
+    - Rocky Ripple
+    - Williams Creek
+    - Forest Hills
+    - Meridian Hills
+    # Northeast
+    - Keystone
+    - Glendale
+    - Nora
+    - Castleton
+    - Geist
+    - Devington
+    # East
+    - Irvington
+    - Little Flower
+    - Brookside
+    - Warren Park
+    - Cumberland
+    # South
+    - Garfield Park
+    - Southport
+    - Beech Grove
+    - Homecroft
+    - Mars Hill
+    # West
+    - Eagledale
+    - Speedway
+    - Clermont
+    - Lawrence
+    # Surrounding metro cities / towns
+    - Carmel
+    - Fishers
+    - Noblesville
+    - Westfield
+    - Zionsville
+    - Whitestown
+    - Brownsburg
+    - Avon
+    - Plainfield
+    - Greenwood
+    - McCordsville
+  # Undirected adjacency for cascading failure ripple — roughly geographic.
+  # Every seed has 2–4 neighbors so a catastrophic drop ripples outward instead
+  # of stranding isolated nodes.
+  adjacency:
+    Downtown: [Mass Ave, Fountain Square, Fletcher Place, Near Eastside, Near Southside, Near Westside, Riverside, Crown Hill, Old Northside, Chatham-Arch]
+    Mass Ave: [Downtown, Chatham-Arch, Lockerbie Square, Cottage Home, Near Eastside]
+    Fountain Square: [Downtown, Fletcher Place, Near Southside, Garfield Park, Bates-Hendricks]
+    Fletcher Place: [Downtown, Fountain Square, Bates-Hendricks]
+    Bates-Hendricks: [Fletcher Place, Fountain Square, Near Southside]
+    Old Northside: [Downtown, Herron-Morton, Chatham-Arch, Mass Ave]
+    Herron-Morton: [Old Northside, Chatham-Arch, Mapleton-Fall Creek]
+    Chatham-Arch: [Mass Ave, Old Northside, Herron-Morton, Lockerbie Square]
+    Lockerbie Square: [Mass Ave, Chatham-Arch, Cottage Home, Woodruff Place]
+    Cottage Home: [Mass Ave, Lockerbie Square, Woodruff Place]
+    Woodruff Place: [Cottage Home, Lockerbie Square, Near Eastside]
+    Near Eastside: [Downtown, Mass Ave, Woodruff Place, Brookside, Irvington]
+    Near Southside: [Downtown, Fountain Square, Fletcher Place, Bates-Hendricks, Garfield Park]
+    Near Westside: [Downtown, Haughville, Riverside, Speedway]
+    Haughville: [Near Westside, Riverside, Speedway, Eagledale]
+    Riverside: [Near Westside, Haughville, Downtown, Crown Hill, Butler-Tarkington]
+    Crown Hill: [Downtown, Riverside, Butler-Tarkington, Meridian-Kessler, Mapleton-Fall Creek]
+    Mapleton-Fall Creek: [Crown Hill, Meridian-Kessler, Herron-Morton, Fall Creek Place, Martindale-Brightwood]
+    Fall Creek Place: [Mapleton-Fall Creek, Martindale-Brightwood, Old Northside]
+    Martindale-Brightwood: [Mapleton-Fall Creek, Fall Creek Place, Brookside]
+    Butler-Tarkington: [Crown Hill, Meridian-Kessler, Riverside, Rocky Ripple]
+    Meridian-Kessler: [Butler-Tarkington, Crown Hill, SoBro, Broad Ripple, Mapleton-Fall Creek]
+    SoBro: [Meridian-Kessler, Broad Ripple, Forest Hills]
+    Broad Ripple: [Meridian-Kessler, SoBro, Glendale, Keystone, Rocky Ripple, Forest Hills]
+    Rocky Ripple: [Broad Ripple, Butler-Tarkington, Williams Creek]
+    Williams Creek: [Rocky Ripple, Meridian Hills, Forest Hills]
+    Forest Hills: [SoBro, Broad Ripple, Williams Creek, Meridian Hills]
+    Meridian Hills: [Williams Creek, Forest Hills, Nora]
+    Keystone: [Broad Ripple, Glendale, Nora, Devington]
+    Glendale: [Broad Ripple, Keystone, Devington]
+    Nora: [Keystone, Castleton, Carmel, Meridian Hills]
+    Castleton: [Nora, Geist, Fishers, Lawrence, Devington]
+    Geist: [Castleton, Fishers, Lawrence, McCordsville]
+    Devington: [Keystone, Glendale, Castleton, Lawrence]
+    Irvington: [Near Eastside, Little Flower, Brookside, Warren Park]
+    Little Flower: [Irvington, Brookside, Warren Park]
+    Brookside: [Near Eastside, Martindale-Brightwood, Irvington, Little Flower]
+    Warren Park: [Irvington, Little Flower, Cumberland, Lawrence]
+    Cumberland: [Warren Park, Lawrence, McCordsville]
+    Garfield Park: [Fountain Square, Near Southside, Southport, Beech Grove]
+    Southport: [Garfield Park, Greenwood, Beech Grove, Homecroft]
+    Beech Grove: [Garfield Park, Southport, Greenwood, Lawrence]
+    Homecroft: [Southport, Greenwood]
+    Mars Hill: [Eagledale, Speedway, Near Westside]
+    Eagledale: [Haughville, Mars Hill, Speedway, Clermont]
+    Speedway: [Near Westside, Haughville, Mars Hill, Eagledale, Clermont, Avon, Brownsburg]
+    Clermont: [Eagledale, Speedway, Brownsburg]
+    Lawrence: [Beech Grove, Warren Park, Castleton, Geist, Cumberland, Devington]
+    Carmel: [Zionsville, Westfield, Fishers, Nora]
+    Fishers: [Carmel, Noblesville, Geist, Castleton, McCordsville]
+    Noblesville: [Westfield, Fishers]
+    Westfield: [Carmel, Zionsville, Noblesville]
+    Zionsville: [Brownsburg, Carmel, Westfield, Whitestown]
+    Whitestown: [Zionsville, Brownsburg]
+    Brownsburg: [Avon, Speedway, Zionsville, Whitestown, Clermont]
+    Avon: [Speedway, Plainfield, Brownsburg]
+    Plainfield: [Avon, Speedway]
+    Greenwood: [Southport, Beech Grove, Homecroft]
+    McCordsville: [Geist, Fishers, Cumberland, Lawrence]
+
+leaderboard:
+  top_n: 10
+
+performance:
+  max_samples: 500
+
+simulator:
+  # Scaled up because the seed list now covers ~60 Indy-metro places —
+  # keeps per-district cadence comparable to the original 8-district setup.
+  events_per_tick: 75
+  tick_interval_ms: 200
+
+cors:
+  allow_origins:
+    - "*"

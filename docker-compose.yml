@@ -1,0 +1,149 @@
+# Requires Docker Compose v2.24+ (service_completed_successfully condition).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: citylb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/00-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d citylb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.11
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "19092:9092"
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.11
+    depends_on:
+      - redpanda
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "sleep 5 && rpk topic create sensor.traffic sensor.aqi sensor.power sensor.water sensor.noise city.cascade --partitions 1 --replicas 1 --brokers redpanda:9092 || true"
+
+  simulator:
+    build: .
+    command: ["python", "-m", "services.simulator"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  flink-jobmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    command: jobmanager
+    ports:
+      - "8081:8081"   # Flink Web UI
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 10
+        restart-strategy.fixed-delay.delay: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  flink-taskmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://app:app@postgres:5432/citylb
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      - flink-jobmanager
+
+  flink-submit:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    environment:
+      FLINK_PROPERTIES: |
+        rest.address: flink-jobmanager
+        rest.port: 8081
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://app:app@postgres:5432/citylb
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    command: >
+      bash -c "
+        echo '[flink-submit] Waiting for Flink cluster + Kafka topics...' &&
+        sleep 25 &&
+        /opt/flink/bin/flink run -d --jarfile /opt/flink/lib/flink-sql-connector-kafka-3.0.2-1.18.jar -py /opt/flink/jobs/flink_job.py &&
+        echo '[flink-submit] Job submitted successfully'
+      "
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://app:app@postgres:5432/citylb
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

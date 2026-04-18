@@ -1,0 +1,20 @@
+FROM flink:1.18.1
+
+# Install Python 3 + pip (Flink 1.18 supports Python 3.8–3.11)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev gcc libpq-dev && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    pip3 install --no-cache-dir \
+        apache-flink==1.18.1 \
+        redis==5.2.1 \
+        "psycopg[binary]==3.2.3" && \
+    apt-get purge -y --auto-remove gcc python3-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Kafka SQL connector for Flink 1.18
+ADD --chmod=644 https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.0.2-1.18/flink-sql-connector-kafka-3.0.2-1.18.jar /opt/flink/lib/
+
+# Copy the Flink job source
+COPY backend/services/flink_job.py /opt/flink/jobs/flink_job.py
