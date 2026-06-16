@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,12 +49,32 @@ if os.environ.get("REDIS_URL"):
 
 _PIPELINE = pipeline_enabled(_cfg)
 
-app = FastAPI(title="Smart City Leaderboard API", version="1.0.0")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Pipeline mode: verify Redis + Postgres are reachable up front so a
+    # misconfigured deploy fails fast instead of on the first request.
+    # Legacy mode: bootstrap the SQLite schema.
+    if _PIPELINE:
+        r = redis_client(redis_url(_cfg))
+        r.ping()
+        with connect_pg(database_url(_cfg)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+    else:
+        with connect_sqlite(database_url(_cfg)) as conn:
+            init_sqlite_schema(conn)
+    yield
+
+
+app = FastAPI(title="Smart City Leaderboard API", version="1.0.0", lifespan=lifespan)
+
+# allow_credentials must be False when origins is "*": the CORS spec forbids a
+# wildcard origin on credentialed responses, and this API is cookie-free anyway.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cfg.cors.allow_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -125,25 +146,12 @@ def _resolve_remove_target(body: RemoveBody) -> str:
     return (body.id or "").strip()
 
 
-@app.on_event("startup")
-def startup() -> None:
-    if _PIPELINE:
-        r = redis_client(redis_url(_cfg))
-        r.ping()
-        with connect_pg(database_url(_cfg)) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-        return
-    with connect_sqlite(database_url(_cfg)) as conn:
-        init_sqlite_schema(conn)
-
-
 @app.post("/add", status_code=201)
 def add_entry(body: AddBody) -> dict[str, Any]:
     district = _resolve_district(body)
     score = float(body.score)
     if body.catastrophic:
-        score = min(score, 25.0)
+        score = min(score, _cfg.urban_health.cascade.catastrophic_score_cap)
     entry_id = str(uuid.uuid4())
     ts = _now_iso()
 

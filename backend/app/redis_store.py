@@ -15,8 +15,20 @@ OVERRIDE_TTL_SECONDS = 30
 SUPPRESS_PREFIX = "suppress:"
 
 
+_clients: dict[str, redis.Redis] = {}
+
+
 def client(url: str) -> redis.Redis:
-    return redis.Redis.from_url(url, decode_responses=True)
+    """Return a process-wide Redis client for ``url``.
+
+    redis-py clients are thread-safe and own a connection pool, so we memoize
+    one per URL instead of building a fresh pool on every API request.
+    """
+    existing = _clients.get(url)
+    if existing is None:
+        existing = redis.Redis.from_url(url, decode_responses=True)
+        _clients[url] = existing
+    return existing
 
 
 def set_detail(r: redis.Redis, district_id: str, payload: dict[str, Any]) -> None:

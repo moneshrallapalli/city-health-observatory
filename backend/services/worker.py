@@ -56,6 +56,7 @@ def main() -> None:
     blend = float(cfg.urban_health.decay.previous_blend)
     drop_thr = float(cfg.urban_health.cascade.drop_threshold)
     penalty = float(cfg.urban_health.cascade.neighbor_penalty)
+    penalty_windows = int(cfg.urban_health.cascade.penalty_windows)
     adj = cfg.districts.adjacency
 
     consumer = KafkaConsumer(
@@ -77,6 +78,12 @@ def main() -> None:
     # Rolling buffer: district -> dim -> list[(ts_epoch, value)]
     buf: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
     last_published: dict[str, float] = {}
+
+    # Cascade ripple state: a catastrophic drop schedules each neighbor for a
+    # per-window penalty across the next `penalty_windows` windows (not a single
+    # one-shot hit), with `pending_source` remembering which district triggered it.
+    pending_penalty: dict[str, int] = {}
+    pending_source: dict[str, str] = {}
 
     session_onboarded = 0   # every record pulled from Kafka (all topics)
     session_processed = 0   # records that reached the aggregator or cascade apply
@@ -113,7 +120,7 @@ def main() -> None:
                 topic = rec.topic
                 val = rec.value
                 if topic == cascade_topic:
-                    _apply_cascade(r, dsn, val, penalty, adj)
+                    _register_cascade(val, penalty_windows, adj, pending_penalty, pending_source)
                     session_processed += 1
                     continue
                 dim = topic_to_dim.get(topic)
@@ -166,65 +173,106 @@ def main() -> None:
         agg_ms = (time.perf_counter() - t_agg0) * 1000.0
         t_write0 = time.perf_counter()
 
-        districts_touched = set(buf.keys())
-        if districts_touched:
+        # Districts to write this window = those with fresh sensor samples this
+        # window, plus any still serving out a cascade penalty from a prior one.
+        penalized_now = {d for d, rem in pending_penalty.items() if rem > 0}
+        write_districts = sorted(set(buf.keys()) | penalized_now)
+        if write_districts:
             with connect_pg(dsn) as conn:
-                for district in sorted(districts_touched):
+                for district in write_districts:
                     # Manual override holds the leaderboard for up to
-                    # OVERRIDE_TTL_SECONDS.  Don't let the stream window
-                    # overwrite the operator's pinned score mid-TTL — samples
-                    # still live in `buf` and will be flushed as normal on the
-                    # next window after the override expires.
+                    # OVERRIDE_TTL_SECONDS.  Don't let the stream window or a
+                    # cascade penalty overwrite the operator's pinned score
+                    # mid-TTL — buffered samples flush as normal once it expires.
                     if get_override(r, district) is not None:
                         continue
-                    dims = buf.get(district, {})
-                    comp: dict[str, float] = {}
-                    for dim_key in weights.keys():
-                        samples = dims.get(dim_key, [])
-                        if samples:
-                            comp[dim_key] = float(sum(v for _, v in samples) / len(samples))
+
+                    dims = buf.get(district)
+                    if dims:
+                        comp: dict[str, float] = {}
+                        for dim_key in weights.keys():
+                            samples = dims.get(dim_key, [])
+                            if samples:
+                                comp[dim_key] = float(sum(v for _, v in samples) / len(samples))
+                            else:
+                                prev = _read_prev_component(r, district, dim_key)
+                                comp[dim_key] = prev if prev is not None else 70.0
+                        raw_uhs = sum(float(weights[k]) * _clamp(float(comp[k])) for k in weights.keys())
+
+                        # A fresh in-window drop spawns a *new* ripple to neighbors.
+                        prev_score = last_published.get(district)
+                        if prev_score is not None and (prev_score - raw_uhs) >= drop_thr:
+                            producer.send(
+                                cascade_topic,
+                                {
+                                    "type": "ripple",
+                                    "source": district,
+                                    "reason": "score_drop",
+                                    "delta": round(prev_score - raw_uhs, 4),
+                                    "ts": _now_iso(),
+                                },
+                            )
+
+                        old_redis = r.zscore(LB_ZSET, district)
+                        old = float(old_redis) if old_redis is not None else None
+                        blended = raw_uhs if old is None else (1.0 - blend) * raw_uhs + blend * old
+                        base_score = _clamp(blended)
+                        components: dict[str, float] | None = {k: round(float(v), 4) for k, v in comp.items()}
+                        uhs_raw: float | None = round(raw_uhs, 4)
+                    else:
+                        # Penalized neighbor with no fresh samples this window —
+                        # carry its current score forward so the penalty bites.
+                        cur = r.zscore(LB_ZSET, district)
+                        base_score = float(cur) if cur is not None else 70.0
+                        components = None
+                        uhs_raw = None
+
+                    # Apply one window's worth of cascade penalty and decrement the
+                    # remaining-window counter (cascade.penalty_windows total).
+                    remaining = pending_penalty.get(district, 0)
+                    cascade_from: str | None = None
+                    if remaining > 0:
+                        base_score = _clamp(base_score - penalty)
+                        cascade_from = pending_source.get(district)
+                        remaining -= 1
+                        if remaining > 0:
+                            pending_penalty[district] = remaining
                         else:
-                            prev = _read_prev_component(r, district, dim_key)
-                            comp[dim_key] = prev if prev is not None else 70.0
+                            pending_penalty.pop(district, None)
+                            pending_source.pop(district, None)
+                        source_label = "cascade"
+                    else:
+                        source_label = "stream"
 
-                    raw_uhs = sum(float(weights[k]) * _clamp(float(comp[k])) for k in weights.keys())
-
-                    prev_score = last_published.get(district)
-                    if prev_score is not None and (prev_score - raw_uhs) >= drop_thr:
-                        payload = {
-                            "type": "ripple",
-                            "source": district,
-                            "reason": "score_drop",
-                            "delta": round(prev_score - raw_uhs, 4),
-                            "ts": _now_iso(),
-                        }
-                        producer.send(cascade_topic, payload)
-
-                    old_redis = r.zscore(LB_ZSET, district)
-                    old = float(old_redis) if old_redis is not None else None
-                    blended = raw_uhs if old is None else (1.0 - blend) * raw_uhs + blend * old
-                    final_score = _clamp(blended)
-
-                    detail = {
+                    final_score = base_score
+                    detail: dict[str, Any] = {
                         "district_id": district,
                         "score": round(final_score, 4),
-                        "components": {k: round(float(v), 4) for k, v in comp.items()},
+                        "components": components,
                         "updated_at": _now_iso(),
-                        "uhs_raw": round(raw_uhs, 4),
                     }
+                    if uhs_raw is not None:
+                        detail["uhs_raw"] = uhs_raw
+                    if cascade_from is not None:
+                        detail["cascade_from"] = cascade_from
+                        detail["penalty_windows_left"] = pending_penalty.get(district, 0)
                     zadd_score(r, district, final_score)
                     set_detail(r, district, detail)
                     last_published[district] = final_score
 
-                    entry_id = str(uuid.uuid4())
                     insert_score_history(
                         conn,
-                        entry_id=entry_id,
+                        entry_id=str(uuid.uuid4()),
                         district_id=district,
                         score=float(final_score),
                         submitted_at=detail["updated_at"],
-                        source="stream",
-                        meta={"components": comp, "uhs_raw": raw_uhs},
+                        source=source_label,
+                        meta={
+                            "components": components,
+                            "uhs_raw": uhs_raw,
+                            "cascade_from": cascade_from,
+                            "penalty_windows_left": pending_penalty.get(district, 0),
+                        },
                     )
 
         # Emit a manual-source heartbeat row per active override so the
@@ -293,38 +341,23 @@ def _read_prev_component(r: Any, district: str, dim: str) -> float | None:
         return None
 
 
-def _apply_cascade(r: Any, dsn: str, val: dict[str, Any], penalty: float, adj: dict[str, list[str]]) -> None:
+def _register_cascade(
+    val: dict[str, Any],
+    penalty_windows: int,
+    adj: dict[str, list[str]],
+    pending: dict[str, int],
+    pending_source: dict[str, str],
+) -> None:
+    """Schedule a per-window penalty for each neighbor of the cascade source.
+
+    The actual score deduction happens at window flush in ``main`` so the
+    penalty applies for ``penalty_windows`` consecutive windows (the
+    ``cascade.penalty_windows`` config), instead of a single one-shot hit.
+    """
     src = str(val.get("source") or "").strip()
-    neighbors = adj.get(src, [])
-    if not neighbors:
-        return
-    ts = _now_iso()
-    with connect_pg(dsn) as conn:
-        for n in neighbors:
-            if get_override(r, n) is not None:
-                continue
-            cur = r.zscore(LB_ZSET, n)
-            base = float(cur) if cur is not None else 70.0
-            new_score = _clamp(base - penalty)
-            zadd_score(r, n, new_score)
-            detail = {
-                "district_id": n,
-                "score": round(new_score, 4),
-                "components": None,
-                "updated_at": ts,
-                "cascade_from": src,
-            }
-            set_detail(r, n, detail)
-            entry_id = str(uuid.uuid4())
-            insert_score_history(
-                conn,
-                entry_id=entry_id,
-                district_id=n,
-                score=float(new_score),
-                submitted_at=ts,
-                source="cascade",
-                meta={"source": src, "payload": val},
-            )
+    for n in adj.get(src, []):
+        pending[n] = penalty_windows
+        pending_source[n] = src
 
 
 if __name__ == "__main__":

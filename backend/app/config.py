@@ -52,6 +52,9 @@ class UrbanCascadeCfg(BaseModel):
     drop_threshold: float = 20.0
     neighbor_penalty: float = 12.0
     penalty_windows: int = 2
+    # A `POST /add` flagged catastrophic is capped at this score so a manual
+    # "disaster" can't be pinned high.
+    catastrophic_score_cap: float = 25.0
 
 
 class UrbanHealthCfg(BaseModel):

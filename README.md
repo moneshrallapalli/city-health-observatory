@@ -141,11 +141,22 @@ Both modes serve the **same REST API** and the **same dashboard**.
 
 ### Option A — Full streaming stack (Docker)
 
-Requires Docker Desktop / Docker Engine with Compose **v2.24+** (for `service_completed_successfully`).
+Requires Docker Desktop / Docker Engine with Compose **v2.24+** (for `service_completed_successfully` and profiles).
+
+Pick **one** stream processor via a Compose profile — the shared infra (Redpanda, Redis, Postgres, simulator, API) comes up either way:
 
 ```bash
-docker compose up --build
+# Recommended: pure-Python worker (same UHS math, no JVM to babysit)
+docker compose --profile worker up --build
+
+# Or: Apache Flink (PyFlink job, adds the Flink Web UI on :8081)
+docker compose --profile flink up --build
 ```
+
+> Run exactly one profile at a time — `worker` and `flink` both write the same Redis keys, so enabling both double-processes the stream. A bare `docker compose up` (no profile) starts the infra but no processor, so the leaderboard stays empty until you add a profile.
+>
+> On a host where ports 8000/5432/6379 are already taken, copy `docker-compose.local.yml.example` to `docker-compose.local.yml` (gitignored) to remap them, then:
+> `docker compose -f docker-compose.yml -f docker-compose.local.yml --profile worker up --build`
 
 Once everything is healthy:
 
@@ -195,12 +206,14 @@ Weights live in `backend/config.yaml` under `urban_health.weights` and must sum 
 
 ## Cascading Failure Model
 
-When a district's score drops by more than `cascade.drop_threshold` (default **20** points) in a single window **and** is flagged catastrophic, the worker:
+When a district's score drops by more than `cascade.drop_threshold` (default **20** points) between two windows — or a `POST /add` arrives flagged `catastrophic` — the processor:
 
 1. Publishes a `city.cascade` event with the originating district and ripple metadata.
-2. Subtracts `cascade.neighbor_penalty` (default **12** points) from each adjacent district's score for the next `cascade.penalty_windows` windows (default **2**).
+2. Schedules each adjacent district for a `cascade.neighbor_penalty` (default **12** point) deduction, applied once per window for the next `cascade.penalty_windows` windows (default **2**). The penalty is re-applied on top of each fresh window score, so the ripple decays over ~2 windows rather than landing as a single one-shot hit.
 
-Adjacency is an undirected graph defined under `districts.adjacency` in `config.yaml` — every seed district has 2–4 neighbors so a single failure propagates outward instead of stranding isolated nodes.
+Each penalized window is written to history with `source: "cascade"` and a `penalty_windows_left` counter, and the live snapshot carries a `cascade_from` field naming the originating district. The plain-Python worker tracks the remaining-window counter in-process; the Flink job keeps it in a `cascade_pending:<district>` Redis key so it survives across task slots.
+
+Adjacency is an undirected graph defined under `districts.adjacency` in `config.yaml` — every edge is symmetric (if A lists B, B lists A) and each seed district has a handful of neighbors (2–10, densest around the downtown core), so a single failure propagates outward instead of stranding isolated nodes.
 
 ## REST API
 
@@ -208,7 +221,7 @@ Full contract is in [`backend/openapi.yaml`](backend/openapi.yaml). Highlights:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/add` | Add or override a district's UHS (`{district, score, catastrophic?}`) |
+| `POST` | `/add` | Add or override a district's UHS (`{district, score, catastrophic?}`). `catastrophic:true` caps the score at `cascade.catastrophic_score_cap` (default **25**) and fires a ripple to neighbors. |
 | `POST` | `/remove` | Remove a district from the leaderboard |
 | `GET` | `/leaderboard` | Top-N HTML table |
 | `GET` | `/state` | JSON snapshot of every district + score components (used by dashboard) |
