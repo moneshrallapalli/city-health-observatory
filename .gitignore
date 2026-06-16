@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Local data / history
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Env / logs
+.env
+*.log
