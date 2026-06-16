@@ -8,6 +8,7 @@ RUN apt-get update -y && \
     pip3 install --no-cache-dir \
         apache-flink==1.18.1 \
         redis==5.2.1 \
+        pyyaml==6.0.2 \
         "psycopg[binary]==3.2.3" && \
     apt-get purge -y --auto-remove gcc python3-dev && \
     apt-get clean && \
@@ -16,5 +17,7 @@ RUN apt-get update -y && \
 # Kafka SQL connector for Flink 1.18
 ADD --chmod=644 https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.0.2-1.18/flink-sql-connector-kafka-3.0.2-1.18.jar /opt/flink/lib/
 
-# Copy the Flink job source
+# Copy the Flink job source + the shared config (single source of truth for
+# weights, districts, and cascade params — loaded by flink_job.py at startup).
 COPY backend/services/flink_job.py /opt/flink/jobs/flink_job.py
+COPY backend/config.yaml /opt/flink/jobs/config.yaml

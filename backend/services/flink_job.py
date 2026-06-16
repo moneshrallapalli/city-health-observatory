@@ -25,36 +25,54 @@ import psycopg
 from psycopg.types.json import Json
 
 
-# Mirrors backend/config.yaml so the Flink image stays self-contained.
-WEIGHTS: dict[str, float] = {
+# Single source of truth is backend/config.yaml, copied next to this job in the
+# Flink image (see Dockerfile.flink).  We load it at startup and fall back to the
+# constants below only if it can't be read — that keeps the districts/weights
+# from silently drifting out of sync with the rest of the system.
+_FALLBACK_WEIGHTS: dict[str, float] = {
     "traffic": 0.25,
     "aqi": 0.30,
     "power": 0.20,
     "water": 0.10,
     "noise": 0.15,
 }
+_FALLBACK_ADJACENCY: dict[str, list[str]] = {}
+_FALLBACK_CASCADE = {"drop_threshold": 20.0, "neighbor_penalty": 12.0, "penalty_windows": 2}
 
-ADJACENCY: dict[str, list[str]] = {
-    "Downtown": ["Midtown", "Harbor", "Eastside"],
-    "Harbor": ["Downtown", "Industrial"],
-    "Eastside": ["Downtown", "Airport"],
-    "Airport": ["Eastside", "Industrial"],
-    "Midtown": ["Downtown", "Northside", "Uptown"],
-    "Northside": ["Midtown", "Industrial"],
-    "Industrial": ["Harbor", "Airport", "Northside"],
-    "Uptown": ["Midtown"],
-}
 
-BLEND = 0.15
-DROP_THRESHOLD = 20.0
-NEIGHBOR_PENALTY = 12.0
-WINDOW_SECONDS = 5
+def _load_config() -> dict[str, Any]:
+    try:
+        import yaml  # available in the Flink image (see Dockerfile.flink)
+
+        cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception as exc:  # pragma: no cover - defensive: never crash the job
+        print(f"[flink] config.yaml load failed ({exc}); using fallback constants", flush=True)
+        return {}
+
+
+_CFG = _load_config()
+_uh = _CFG.get("urban_health", {})
+_cascade_cfg = {**_FALLBACK_CASCADE, **_uh.get("cascade", {})}
+
+WEIGHTS: dict[str, float] = _uh.get("weights") or _FALLBACK_WEIGHTS
+ADJACENCY: dict[str, list[str]] = _CFG.get("districts", {}).get("adjacency") or _FALLBACK_ADJACENCY
+BLEND = float(_uh.get("decay", {}).get("previous_blend", 0.15))
+DROP_THRESHOLD = float(_cascade_cfg["drop_threshold"])
+NEIGHBOR_PENALTY = float(_cascade_cfg["neighbor_penalty"])
+PENALTY_WINDOWS = int(_cascade_cfg["penalty_windows"])
+WINDOW_SECONDS = int(_uh.get("aggregation_window_seconds", 5))
 
 LB_ZSET = "lb:scores"
 LB_DETAIL = "lb:detail:"
 PIPE_STATS_KEY = "pipeline:stats"
 OVERRIDE_PREFIX = "override:"
 SUPPRESS_PREFIX = "suppress:"
+# Redis counter of remaining penalty windows per district.  A cascade sets it to
+# PENALTY_WINDOWS; each window flush for that district applies one penalty and
+# decrements — Redis-backed because Flink may key districts across task slots.
+CASCADE_PENDING_PREFIX = "cascade_pending:"
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -127,6 +145,15 @@ class UHSWindowProcessor(ProcessWindowFunction):
             final_score = _clamp(blended)
             source_label = "flink"
 
+        # Apply one window of any scheduled cascade penalty (overrides are immune
+        # while pinned).  The counter persists the ripple for PENALTY_WINDOWS.
+        cascade_from: str | None = None
+        if not override_active:
+            cascade_from = self._consume_cascade_penalty(key)
+            if cascade_from is not None:
+                final_score = _clamp(final_score - NEIGHBOR_PENALTY)
+                source_label = "flink-cascade"
+
         ts = _now_iso()
 
         self._redis.zadd(LB_ZSET, {key: final_score})
@@ -138,6 +165,8 @@ class UHSWindowProcessor(ProcessWindowFunction):
             "uhs_raw": round(raw_uhs, 4),
             "source": source_label,
         }
+        if cascade_from is not None:
+            detail["cascade_from"] = cascade_from
         if override_active:
             detail["override_active"] = True
             detail["override_remaining_seconds"] = int(override_ttl)
@@ -164,7 +193,7 @@ class UHSWindowProcessor(ProcessWindowFunction):
 
         prev_published = self._last_published.get(key)
         if prev_published is not None and (prev_published - raw_uhs) >= DROP_THRESHOLD:
-            self._apply_cascade(key, prev_published - raw_uhs)
+            self._schedule_cascade(key, prev_published - raw_uhs)
 
         self._last_published[key] = final_score
         self._update_pipeline_stats(key, final_score, count)
@@ -181,41 +210,50 @@ class UHSWindowProcessor(ProcessWindowFunction):
         except Exception:
             return None
 
-    def _apply_cascade(self, source: str, delta: float) -> None:
+    def _schedule_cascade(self, source: str, delta: float) -> None:
+        """Schedule a per-window penalty for each neighbor for PENALTY_WINDOWS
+        windows.  The deduction itself happens in each neighbor's own window via
+        ``_consume_cascade_penalty`` so the ripple decays over time rather than
+        landing as a single one-shot hit."""
         neighbors = ADJACENCY.get(source, [])
         if not neighbors:
             return
-        ts = _now_iso()
+        # TTL guards against a stranded counter if a neighbor stops receiving data.
+        ttl = max(1, PENALTY_WINDOWS) * max(1, WINDOW_SECONDS) * 4
         for n in neighbors:
-            cur = self._redis.zscore(LB_ZSET, n)
-            base = float(cur) if cur is not None else 70.0
-            new_score = _clamp(base - NEIGHBOR_PENALTY)
-            self._redis.zadd(LB_ZSET, {n: new_score})
-            cascade_detail: dict[str, Any] = {
-                "district_id": n,
-                "score": round(new_score, 4),
-                "components": None,
-                "updated_at": ts,
-                "cascade_from": source,
-                "source": "flink-cascade",
-            }
-            self._redis.set(LB_DETAIL + n, json.dumps(cascade_detail))
-            with psycopg.connect(self._dsn, autocommit=False) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO score_history
-                           (id, district_id, score, submitted_at, source, meta)
-                           VALUES (%s, %s, %s, %s::timestamptz, %s, %s)""",
-                        (
-                            uuid.uuid4(),
-                            n,
-                            float(new_score),
-                            ts,
-                            "flink-cascade",
-                            Json({"source_district": source, "delta": round(delta, 4)}),
-                        ),
-                    )
-                conn.commit()
+            self._redis.set(
+                CASCADE_PENDING_PREFIX + n,
+                json.dumps({"windows": PENALTY_WINDOWS, "source": source}),
+                ex=ttl,
+            )
+
+    def _consume_cascade_penalty(self, district: str) -> str | None:
+        """If a cascade penalty is scheduled for ``district``, decrement it and
+        return the originating district; otherwise return None."""
+        raw = self._redis.get(CASCADE_PENDING_PREFIX + district)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            windows = int(data.get("windows", 0))
+            source = str(data.get("source", ""))
+        except Exception:
+            self._redis.delete(CASCADE_PENDING_PREFIX + district)
+            return None
+        if windows <= 0:
+            self._redis.delete(CASCADE_PENDING_PREFIX + district)
+            return None
+        windows -= 1
+        if windows > 0:
+            ttl = max(1, PENALTY_WINDOWS) * max(1, WINDOW_SECONDS) * 4
+            self._redis.set(
+                CASCADE_PENDING_PREFIX + district,
+                json.dumps({"windows": windows, "source": source}),
+                ex=ttl,
+            )
+        else:
+            self._redis.delete(CASCADE_PENDING_PREFIX + district)
+        return source or None
 
     def _update_pipeline_stats(self, district: str, score: float, events: int) -> None:
         self._redis.set(

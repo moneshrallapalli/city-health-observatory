@@ -195,10 +195,12 @@ Weights live in `backend/config.yaml` under `urban_health.weights` and must sum 
 
 ## Cascading Failure Model
 
-When a district's score drops by more than `cascade.drop_threshold` (default **20** points) in a single window **and** is flagged catastrophic, the worker:
+When a district's score drops by more than `cascade.drop_threshold` (default **20** points) between two windows — or a `POST /add` arrives flagged `catastrophic` — the processor:
 
 1. Publishes a `city.cascade` event with the originating district and ripple metadata.
-2. Subtracts `cascade.neighbor_penalty` (default **12** points) from each adjacent district's score for the next `cascade.penalty_windows` windows (default **2**).
+2. Schedules each adjacent district for a `cascade.neighbor_penalty` (default **12** point) deduction, applied once per window for the next `cascade.penalty_windows` windows (default **2**). The penalty is re-applied on top of each fresh window score, so the ripple decays over ~2 windows rather than landing as a single one-shot hit.
+
+Each penalized window is written to history with `source: "cascade"` and a `penalty_windows_left` counter, and the live snapshot carries a `cascade_from` field naming the originating district. The plain-Python worker tracks the remaining-window counter in-process; the Flink job keeps it in a `cascade_pending:<district>` Redis key so it survives across task slots.
 
 Adjacency is an undirected graph defined under `districts.adjacency` in `config.yaml` — every seed district has 2–4 neighbors so a single failure propagates outward instead of stranding isolated nodes.
 
