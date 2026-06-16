@@ -141,11 +141,22 @@ Both modes serve the **same REST API** and the **same dashboard**.
 
 ### Option A — Full streaming stack (Docker)
 
-Requires Docker Desktop / Docker Engine with Compose **v2.24+** (for `service_completed_successfully`).
+Requires Docker Desktop / Docker Engine with Compose **v2.24+** (for `service_completed_successfully` and profiles).
+
+Pick **one** stream processor via a Compose profile — the shared infra (Redpanda, Redis, Postgres, simulator, API) comes up either way:
 
 ```bash
-docker compose up --build
+# Recommended: pure-Python worker (same UHS math, no JVM to babysit)
+docker compose --profile worker up --build
+
+# Or: Apache Flink (PyFlink job, adds the Flink Web UI on :8081)
+docker compose --profile flink up --build
 ```
+
+> Run exactly one profile at a time — `worker` and `flink` both write the same Redis keys, so enabling both double-processes the stream. A bare `docker compose up` (no profile) starts the infra but no processor, so the leaderboard stays empty until you add a profile.
+>
+> On a host where ports 8000/5432/6379 are already taken, copy `docker-compose.local.yml.example` to `docker-compose.local.yml` (gitignored) to remap them, then:
+> `docker compose -f docker-compose.yml -f docker-compose.local.yml --profile worker up --build`
 
 Once everything is healthy:
 

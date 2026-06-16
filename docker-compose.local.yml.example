@@ -1,0 +1,10 @@
+# Machine-specific overrides (NOT committed). Used on hosts where the default
+# ports clash with other local services. Pass it explicitly, e.g.:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml --profile worker up --build
+services:
+  postgres:
+    ports: !reset []   # keep internal; a host Postgres already owns 5432
+  redis:
+    ports: !reset []   # keep internal; a host Redis already owns 6379
+  api:
+    ports: !override ["8010:8000"]   # 8000 is taken locally

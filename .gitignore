@@ -14,3 +14,10 @@ backend/data/
 # Env / logs
 .env
 *.log
+
+# Dev workflow scaffolding
+tasks/
+
+# Machine-specific compose overrides (ports, etc.)
+docker-compose.override.yml
+docker-compose.local.yml
