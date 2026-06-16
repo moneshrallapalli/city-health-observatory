@@ -202,7 +202,7 @@ When a district's score drops by more than `cascade.drop_threshold` (default **2
 
 Each penalized window is written to history with `source: "cascade"` and a `penalty_windows_left` counter, and the live snapshot carries a `cascade_from` field naming the originating district. The plain-Python worker tracks the remaining-window counter in-process; the Flink job keeps it in a `cascade_pending:<district>` Redis key so it survives across task slots.
 
-Adjacency is an undirected graph defined under `districts.adjacency` in `config.yaml` — every seed district has 2–4 neighbors so a single failure propagates outward instead of stranding isolated nodes.
+Adjacency is an undirected graph defined under `districts.adjacency` in `config.yaml` — every edge is symmetric (if A lists B, B lists A) and each seed district has a handful of neighbors (2–10, densest around the downtown core), so a single failure propagates outward instead of stranding isolated nodes.
 
 ## REST API
 
@@ -210,7 +210,7 @@ Full contract is in [`backend/openapi.yaml`](backend/openapi.yaml). Highlights:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/add` | Add or override a district's UHS (`{district, score, catastrophic?}`) |
+| `POST` | `/add` | Add or override a district's UHS (`{district, score, catastrophic?}`). `catastrophic:true` caps the score at `cascade.catastrophic_score_cap` (default **25**) and fires a ripple to neighbors. |
 | `POST` | `/remove` | Remove a district from the leaderboard |
 | `GET` | `/leaderboard` | Top-N HTML table |
 | `GET` | `/state` | JSON snapshot of every district + score components (used by dashboard) |

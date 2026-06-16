@@ -151,7 +151,7 @@ def add_entry(body: AddBody) -> dict[str, Any]:
     district = _resolve_district(body)
     score = float(body.score)
     if body.catastrophic:
-        score = min(score, 25.0)
+        score = min(score, _cfg.urban_health.cascade.catastrophic_score_cap)
     entry_id = str(uuid.uuid4())
     ts = _now_iso()
 

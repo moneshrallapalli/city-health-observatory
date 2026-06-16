@@ -40,6 +40,8 @@ urban_health:
     drop_threshold: 20.0
     neighbor_penalty: 12.0
     penalty_windows: 2
+    # POST /add {catastrophic:true} caps the pinned score at this value.
+    catastrophic_score_cap: 25.0
 
 districts:
   # Indianapolis metro — inner neighborhoods, near-ring historic districts, the
@@ -119,19 +121,19 @@ districts:
   # of stranding isolated nodes.
   adjacency:
     Downtown: [Mass Ave, Fountain Square, Fletcher Place, Near Eastside, Near Southside, Near Westside, Riverside, Crown Hill, Old Northside, Chatham-Arch]
-    Mass Ave: [Downtown, Chatham-Arch, Lockerbie Square, Cottage Home, Near Eastside]
+    Mass Ave: [Downtown, Chatham-Arch, Lockerbie Square, Cottage Home, Near Eastside, Old Northside]
     Fountain Square: [Downtown, Fletcher Place, Near Southside, Garfield Park, Bates-Hendricks]
-    Fletcher Place: [Downtown, Fountain Square, Bates-Hendricks]
+    Fletcher Place: [Downtown, Fountain Square, Bates-Hendricks, Near Southside]
     Bates-Hendricks: [Fletcher Place, Fountain Square, Near Southside]
-    Old Northside: [Downtown, Herron-Morton, Chatham-Arch, Mass Ave]
+    Old Northside: [Downtown, Herron-Morton, Chatham-Arch, Mass Ave, Fall Creek Place]
     Herron-Morton: [Old Northside, Chatham-Arch, Mapleton-Fall Creek]
-    Chatham-Arch: [Mass Ave, Old Northside, Herron-Morton, Lockerbie Square]
+    Chatham-Arch: [Mass Ave, Old Northside, Herron-Morton, Lockerbie Square, Downtown]
     Lockerbie Square: [Mass Ave, Chatham-Arch, Cottage Home, Woodruff Place]
     Cottage Home: [Mass Ave, Lockerbie Square, Woodruff Place]
     Woodruff Place: [Cottage Home, Lockerbie Square, Near Eastside]
     Near Eastside: [Downtown, Mass Ave, Woodruff Place, Brookside, Irvington]
     Near Southside: [Downtown, Fountain Square, Fletcher Place, Bates-Hendricks, Garfield Park]
-    Near Westside: [Downtown, Haughville, Riverside, Speedway]
+    Near Westside: [Downtown, Haughville, Riverside, Speedway, Mars Hill]
     Haughville: [Near Westside, Riverside, Speedway, Eagledale]
     Riverside: [Near Westside, Haughville, Downtown, Crown Hill, Butler-Tarkington]
     Crown Hill: [Downtown, Riverside, Butler-Tarkington, Meridian-Kessler, Mapleton-Fall Creek]
@@ -163,9 +165,9 @@ districts:
     Homecroft: [Southport, Greenwood]
     Mars Hill: [Eagledale, Speedway, Near Westside]
     Eagledale: [Haughville, Mars Hill, Speedway, Clermont]
-    Speedway: [Near Westside, Haughville, Mars Hill, Eagledale, Clermont, Avon, Brownsburg]
+    Speedway: [Near Westside, Haughville, Mars Hill, Eagledale, Clermont, Avon, Brownsburg, Plainfield]
     Clermont: [Eagledale, Speedway, Brownsburg]
-    Lawrence: [Beech Grove, Warren Park, Castleton, Geist, Cumberland, Devington]
+    Lawrence: [Beech Grove, Warren Park, Castleton, Geist, Cumberland, Devington, McCordsville]
     Carmel: [Zionsville, Westfield, Fishers, Nora]
     Fishers: [Carmel, Noblesville, Geist, Castleton, McCordsville]
     Noblesville: [Westfield, Fishers]
